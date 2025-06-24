@@ -28,10 +28,34 @@ class IP:
             self.enlace.enviar(datagrama, next_hop)
 
     def _next_hop(self, dest_addr):
-        # TODO: Use a tabela de encaminhamento para determinar o próximo salto
-        # (next_hop) a partir do endereço de destino do datagrama (dest_addr).
-        # Retorne o next_hop para o dest_addr fornecido.
-        pass
+        # LÓGICA DO PASSO 1 IMPLEMENTADA AQUI
+        """
+        Usa a tabela de encaminhamento para determinar o próximo salto
+        (next_hop) a partir do endereço de destino (dest_addr).
+        """
+        try:
+            # Converte o IP de destino para um objeto, facilitando a comparação
+            ip_destino_obj = ipaddress.ip_address(dest_addr)
+        except ValueError:
+            # Endereço de destino inválido
+            return None
+
+        # Itera sobre a tabela de encaminhamento
+        for cidr, next_hop in self.tabela_encaminhamento:
+            try:
+                # Cria um objeto de rede a partir do CIDR
+                rede = ipaddress.ip_network(cidr, strict=False)
+
+                # Verifica se o endereço de destino pertence a esta rede
+                if ip_destino_obj in rede:
+                    # No Passo 1, o primeiro resultado encontrado é o correto.
+                    return next_hop
+            except ValueError:
+                # Ignora CIDRs inválidos na tabela, se houver
+                continue
+
+        # Se não encontrou nenhuma rota na tabela, retorna None
+        return None
 
     def definir_endereco_host(self, meu_endereco):
         """
@@ -42,16 +66,13 @@ class IP:
         self.meu_endereco = meu_endereco
 
     def definir_tabela_encaminhamento(self, tabela):
+        # LÓGICA DO PASSO 1 IMPLEMENTADA AQUI
         """
         Define a tabela de encaminhamento no formato
         [(cidr0, next_hop0), (cidr1, next_hop1), ...]
-
-        Onde os CIDR são fornecidos no formato 'x.y.z.w/n', e os
-        next_hop são fornecidos no formato 'x.y.z.w'.
         """
-        # TODO: Guarde a tabela de encaminhamento. Se julgar conveniente,
-        # converta-a em uma estrutura de dados mais eficiente.
-        pass
+        # Apenas armazena a tabela recebida no atributo da classe.
+        self.tabela_encaminhamento = tabela
 
     def registrar_recebedor(self, callback):
         """
