@@ -44,26 +44,24 @@ class IP:
             # Se achou uma rota, simplesmente encaminha o datagrama ORIGINAL
             if next_hop is not None:
                 self.enlace.enviar(datagrama, next_hop)
+
     def _next_hop(self, dest_addr):
         """
-        Para o dest_addr dado, retorna o next_hop correspondente na tabela,
-        escolhendo a rede com maior prefixo que contém o endereço.
+        Consulta a tabela de encaminhamento (já ordenada) e retorna o
+        primeiro next_hop correspondente.
         """
-        # Adicionado um try/except para endereços de destino inválidos
         try:
             ip = ipaddress.IPv4Address(dest_addr)
         except ValueError:
             return None
-            
-        melhor_entrada = None
-        maior_prefixo = -1
 
+        # Como a tabela está ordenada do mais específico para o mais genérico,
+        # o primeiro match que encontrarmos é a resposta correta.
         for rede, next_hop in self._tabela_encaminhamento:
-            if ip in rede and rede.prefixlen > maior_prefixo:
-                melhor_entrada = next_hop
-                maior_prefixo = rede.prefixlen
-
-        return melhor_entrada
+            if ip in rede:
+                return next_hop
+        
+        return None # Nenhuma rota encontrada
 
     def definir_endereco_host(self, meu_endereco):
         """
@@ -73,15 +71,21 @@ class IP:
 
     def definir_tabela_encaminhamento(self, tabela):
         """
-        Recebe uma lista de tuplas (cidr, next_hop) e a processa.
+        Define a tabela de encaminhamento. A tabela é ordenada pela máscara de rede,
+        da mais específica (maior prefixo) para a mais genérica (menor prefixo),
+        para implementar a regra do "prefixo mais longo" de forma eficiente.
         """
+        # A chave de ordenação extrai o número do prefixo (ex: /24 -> 24)
+        # e `reverse=True` ordena do maior para o menor.
+        tabela_ordenada = sorted(tabela, key=lambda item: int(item[0].split('/')[1]), reverse=True)
+
         self._tabela_encaminhamento = []
-        for cidr, next_hop in tabela:
+        for cidr, next_hop in tabela_ordenada:
             try:
                 rede = ipaddress.IPv4Network(cidr, strict=False)
                 self._tabela_encaminhamento.append((rede, next_hop))
             except ValueError:
-                continue # Ignora CIDRs inválidos
+                continue
 
     def registrar_recebedor(self, callback):
         """
