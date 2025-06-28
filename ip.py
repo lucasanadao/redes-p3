@@ -1,5 +1,3 @@
-# ip.py - VERSÃO FINAL UNIFICADA
-
 import ipaddress
 import struct
 from iputils import *
@@ -13,17 +11,9 @@ class IP:
         self.tabela_encaminhamento = []
 
     def definir_tabela_encaminhamento(self, tabela):
-        """
-        Define e processa a tabela de encaminhamento. A tabela é ordenada
-        pelo tamanho do prefixo para tornar a busca de rotas (longest prefix match)
-        mais eficiente.
-        """
-        # A chave de ordenação extrai o número do prefixo (ex: de '192.168.0.0/24' pega o 24)
-        # `reverse=True` ordena do maior prefixo para o menor (mais específico para o mais genérico)
         try:
             tabela_ordenada = sorted(tabela, key=lambda item: int(item[0].split('/')[1]), reverse=True)
         except (ValueError, IndexError):
-            # Lida com possíveis CIDRs malformados na tabela de teste
             tabela_ordenada = tabela
 
         self.tabela_encaminhamento = []
@@ -34,53 +24,65 @@ class IP:
                 continue
 
     def _next_hop(self, dest_addr):
-        """
-        Retorna o próximo salto para um determinado endereço de destino.
-        """
         try:
             ip_destino = ipaddress.ip_address(dest_addr)
         except ValueError:
             return None
-
-        # Graças à tabela pré-ordenada, o primeiro "match" encontrado já é o correto
-        # (o que tem o prefixo mais longo).
         for rede, next_hop in self.tabela_encaminhamento:
             if ip_destino in rede:
                 return next_hop
         return None
 
     def __raw_recv(self, datagrama):
-        """
-        Recebe um datagrama e o processa, atuando como host ou roteador.
-        """
         try:
             header_len = (datagrama[0] & 0x0F) * 4
             _, _, _, _, _, ttl, proto, src_addr, dst_addr, payload = read_ipv4_header(datagrama)
         except Exception:
-            return # Descarta pacotes malformados
+            return
 
         if dst_addr == self.meu_endereco:
-            # Lógica de Host
             if proto == IPPROTO_TCP and self.callback:
                 self.callback(src_addr, dst_addr, payload)
-        else:
-            # Lógica de Roteador
+        else: # Roteador
             if ttl <= 1:
-                # Passo 5: Enviar ICMP Time Exceeded aqui
+                # PASSO 5: TTL expirou. Enviar ICMP Time Exceeded.
+                
+                # 1. Monta o payload do ICMP: cabeçalho IP original + 8 primeiros bytes do payload original.
+                icmp_payload = datagrama[:header_len + 8]
+
+                # 2. Monta o cabeçalho ICMP (Tipo 11, Código 0) com checksum zerado
+                #    Os 4 bytes não utilizados devem ser 0.
+                icmp_header_sem_checksum = struct.pack('!BBHI', 11, 0, 0, 0)
+                
+                # Monta o pacote ICMP completo para calcular o checksum
+                pacote_icmp_sem_checksum = icmp_header_sem_checksum + icmp_payload
+                icmp_checksum = calc_checksum(pacote_icmp_sem_checksum)
+
+                # Monta o cabeçalho ICMP final com o checksum correto
+                icmp_header_com_checksum = struct.pack('!BBHI', 11, 0, icmp_checksum, 0)
+
+                # Pacote ICMP final
+                pacote_icmp = icmp_header_com_checksum + icmp_payload
+
+                # 3. Envia o pacote ICMP de volta para a origem do pacote expirado.
+                #    Nós usamos o método `enviar` para fazer isso, pois ele já sabe
+                #    como montar um cabeçalho IP. Precisamos garantir que ele use
+                #    o protocolo ICMP.
+                self.enviar(pacote_icmp, src_addr, protocolo=IPPROTO_ICMP)
+
+                # 4. Descarta o pacote original
                 return
 
             next_hop = self._next_hop(dst_addr)
             if next_hop is None:
-                return # Sem rota, descarta
+                return
 
-            # Modificação do cabeçalho
+            # Lógica do Passo 4 continua aqui...
             novo_header_mutavel = bytearray(datagrama[:header_len])
             novo_header_mutavel[8] = ttl - 1
-            novo_header_mutavel[10:12] = b'\x00\x00' # Zera o checksum
-            
+            novo_header_mutavel[10:12] = b'\x00\x00'
             novo_checksum = calc_checksum(bytes(novo_header_mutavel))
             struct.pack_into('!H', novo_header_mutavel, 10, novo_checksum)
-            
             novo_datagrama = bytes(novo_header_mutavel) + payload
             self.enlace.enviar(novo_datagrama, next_hop)
 
@@ -90,10 +92,10 @@ class IP:
     def registrar_recebedor(self, callback):
         self.callback = callback
 
-    def enviar(self, segmento, dest_addr):
+    def enviar(self, segmento, dest_addr, protocolo=IPPROTO_TCP):
         """
-        Envia um segmento para um destino (usado pelo Teste 2).
-        Esta é a sua implementação original que já funcionava.
+        Envia um segmento para um destino. Modificado para aceitar
+        um protocolo customizado (útil para o ICMP).
         """
         next_hop = self._next_hop(dest_addr)
         if not next_hop:
@@ -101,22 +103,16 @@ class IP:
         
         ver_ihl = (4 << 4) + 5
         total_length = 20 + len(segmento)
-        flags_frag = 0
-        ttl = 64
-        protocolo = IPPROTO_TCP
-        checksum = 0
-
-        src = str2addr(self.meu_endereco)
-        dst = str2addr(dest_addr)
-
+        
+        # Usamos o protocolo que foi passado como argumento
         header_sem_checksum = struct.pack(
             '!BBHHHBBH4s4s',
-            ver_ihl, 0, total_length, 0, flags_frag, ttl, protocolo, checksum, src, dst
+            ver_ihl, 0, total_length, 0, 0, 64, protocolo, 0, str2addr(self.meu_endereco), str2addr(dest_addr)
         )
         checksum_calculado = calc_checksum(header_sem_checksum)
         header_com_checksum = struct.pack(
             '!BBHHHBBH4s4s',
-            ver_ihl, 0, total_length, 0, flags_frag, ttl, protocolo, checksum_calculado, src, dst
+            ver_ihl, 0, total_length, 0, 0, 64, protocolo, checksum_calculado, str2addr(self.meu_endereco), str2addr(dest_addr)
         )
 
         datagrama = header_com_checksum + segmento
