@@ -16,9 +16,10 @@ class IP:
         self.meu_endereco = None
 
     def __raw_recv(self, datagrama):
+        # A leitura do cabeçalho continua igual
         dscp, ecn, identification, flags, frag_offset, ttl, proto, \
             src_addr, dst_addr, payload = read_ipv4_header(datagrama)
-        
+
         if dst_addr == self.meu_endereco:
             # atua como host
             if proto == IPPROTO_TCP and self.callback:
@@ -26,73 +27,112 @@ class IP:
         else:
             # atua como roteador
             
-            # Passo 4.1: Se o TTL for 1 ou menos, o datagrama expira aqui.
-            # Ele deve ser descartado.
+            # 1. Verifica se o TTL vai expirar. Se sim, descarta.
             if ttl <= 1:
-                # No Passo 5, enviaremos uma mensagem ICMP de volta antes de descartar.
-                # Por enquanto, apenas retornamos, efetivamente descartando o pacote.
                 return
 
-            # Encontra o próximo salto
             next_hop = self._next_hop(dst_addr)
-
-            # Se não houver rota, descarte o pacote
             if next_hop is None:
                 return
 
-            # Passo 4.2: Decrementa o TTL
-            novo_ttl = ttl - 1
+            # 2. Cria uma cópia MUTÁVEL do cabeçalho original para modificação
+            novo_header_mutavel = bytearray(datagrama[:20])
 
-            # Passo 4.3: Recalcula o checksum.
-            # Para isso, precisamos remontar o cabeçalho com o novo TTL.
-            # A lógica é a mesma do seu método enviar().
+            # 3. Decrementa o TTL. O TTL está no 9º byte (índice 8).
+            novo_header_mutavel[8] = ttl - 1
+
+            # 4. Zera o campo de checksum (11º e 12º bytes, índices 10 e 11)
+            novo_header_mutavel[10] = 0
+            novo_header_mutavel[11] = 0
+
+            # 5. Calcula o novo checksum sobre o cabeçalho modificado
+            novo_checksum = calc_checksum(novo_header_mutavel)
+
+            # 6. Insere o novo checksum de volta no cabeçalho.
+            # Usamos struct.pack para garantir a ordem correta dos bytes (big-endian)
+            struct.pack_into('!H', novo_header_mutavel, 10, novo_checksum)
             
-            # Recria os campos compostos do cabeçalho original
-            ver_ihl = (4 << 4) + 5 # Versão 4, IHL 5
-            flags_frag = (flags << 13) | frag_offset
+            # 7. Monta o novo datagrama com o cabeçalho finalizado e o payload original
+            novo_datagrama = bytes(novo_header_mutavel) + payload
+
+            # 8. Envia o novo datagrama, que agora está correto
+            self.enlace.enviar(novo_datagrama, next_hop)        dscp, ecn, identification, flags, frag_offset, ttl, proto, \
+                src_addr, dst_addr, payload = read_ipv4_header(datagrama)
             
-            # Converte endereços de string para bytes
-            src_bytes = str2addr(src_addr)
-            dst_bytes = str2addr(dst_addr)
-            
-            # Monta o cabeçalho temporário com checksum 0 para o cálculo
-            header_sem_checksum = struct.pack(
-                '!BBHHHBBH4s4s',
-                ver_ihl,
-                (dscp << 2) | ecn,
-                len(datagrama), # O tamanho total do datagrama não muda
-                identification,
-                flags_frag,
-                novo_ttl,      # USA O NOVO TTL
-                proto,
-                0,             # Checksum zerado para cálculo
-                src_bytes,
-                dst_bytes
-            )
+            if dst_addr == self.meu_endereco:
+                # atua como host
+                if proto == IPPROTO_TCP and self.callback:
+                    self.callback(src_addr, dst_addr, payload)
+            else:
+                # atua como roteador
+                
+                # Passo 4.1: Se o TTL for 1 ou menos, o datagrama expira aqui.
+                # Ele deve ser descartado.
+                if ttl <= 1:
+                    # No Passo 5, enviaremos uma mensagem ICMP de volta antes de descartar.
+                    # Por enquanto, apenas retornamos, efetivamente descartando o pacote.
+                    return
 
-            # Calcula o novo checksum
-            novo_checksum = calc_checksum(header_sem_checksum)
+                # Encontra o próximo salto
+                next_hop = self._next_hop(dst_addr)
 
-            # Monta o cabeçalho final com o checksum correto
-            novo_header = struct.pack(
-                '!BBHHHBBH4s4s',
-                ver_ihl,
-                (dscp << 2) | ecn,
-                len(datagrama),
-                identification,
-                flags_frag,
-                novo_ttl,      # USA O NOVO TTL
-                proto,
-                novo_checksum, # USA O NOVO CHECKSUM
-                src_bytes,
-                dst_bytes
-            )
+                # Se não houver rota, descarte o pacote
+                if next_hop is None:
+                    return
 
-            # Monta o novo datagrama completo
-            novo_datagrama = novo_header + payload
+                # Passo 4.2: Decrementa o TTL
+                novo_ttl = ttl - 1
 
-            # Envia o NOVO datagrama para o próximo salto
-            self.enlace.enviar(novo_datagrama, next_hop)
+                # Passo 4.3: Recalcula o checksum.
+                # Para isso, precisamos remontar o cabeçalho com o novo TTL.
+                # A lógica é a mesma do seu método enviar().
+                
+                # Recria os campos compostos do cabeçalho original
+                ver_ihl = (4 << 4) + 5 # Versão 4, IHL 5
+                flags_frag = (flags << 13) | frag_offset
+                
+                # Converte endereços de string para bytes
+                src_bytes = str2addr(src_addr)
+                dst_bytes = str2addr(dst_addr)
+                
+                # Monta o cabeçalho temporário com checksum 0 para o cálculo
+                header_sem_checksum = struct.pack(
+                    '!BBHHHBBH4s4s',
+                    ver_ihl,
+                    (dscp << 2) | ecn,
+                    len(datagrama), # O tamanho total do datagrama não muda
+                    identification,
+                    flags_frag,
+                    novo_ttl,      # USA O NOVO TTL
+                    proto,
+                    0,             # Checksum zerado para cálculo
+                    src_bytes,
+                    dst_bytes
+                )
+
+                # Calcula o novo checksum
+                novo_checksum = calc_checksum(header_sem_checksum)
+
+                # Monta o cabeçalho final com o checksum correto
+                novo_header = struct.pack(
+                    '!BBHHHBBH4s4s',
+                    ver_ihl,
+                    (dscp << 2) | ecn,
+                    len(datagrama),
+                    identification,
+                    flags_frag,
+                    novo_ttl,      # USA O NOVO TTL
+                    proto,
+                    novo_checksum, # USA O NOVO CHECKSUM
+                    src_bytes,
+                    dst_bytes
+                )
+
+                # Monta o novo datagrama completo
+                novo_datagrama = novo_header + payload
+
+                # Envia o NOVO datagrama para o próximo salto
+                self.enlace.enviar(novo_datagrama, next_hop)
 
 
     def _next_hop(self, dest_addr):
