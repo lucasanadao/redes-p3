@@ -21,29 +21,55 @@ class IP:
 
     def __raw_recv(self, datagrama):
         """
-        Versão de DEBUG para isolar o problema do envio duplicado.
-        Apenas a lógica dos Passos 1 e 3 está presente.
+        Função de recebimento de datagramas. Roteia ou entrega para a camada superior.
         """
+        # Usamos um try/except para descartar pacotes malformados que não podem ser lidos
         try:
-            # Apenas lemos o dst_addr, nada mais importa por enquanto
-            _, _, _, _, _, _, _, _, dst_addr, _ = read_ipv4_header(datagrama)
+            header_len = (datagrama[0] & 0x0F) * 4
+            dscp, ecn, identification, flags, frag_offset, ttl, proto, \
+                src_addr, dst_addr, payload = read_ipv4_header(datagrama)
         except:
             return
 
         if dst_addr == self.meu_endereco:
-            # A lógica de host não é relevante para esses testes
-            if self.callback:
-                # Para sermos completos, vamos chamar o callback se necessário
-                _, _, _, _, _, _, proto, src_addr, _, payload = read_ipv4_header(datagrama)
-                if proto == IPPROTO_TCP:
-                    self.callback(src_addr, dst_addr, payload)
+            # Atua como host: entrega para a camada de transporte (TCP)
+            if proto == IPPROTO_TCP and self.callback:
+                self.callback(src_addr, dst_addr, payload)
         else:
-            # Lógica de roteador MINIMALISTA (Passos 1 e 3)
-            next_hop = self._next_hop(dst_addr)
+            # Atua como roteador: encaminha o pacote
             
-            # Se achou uma rota, simplesmente encaminha o datagrama ORIGINAL
-            if next_hop is not None:
-                self.enlace.enviar(datagrama, next_hop)
+            # Se o TTL for expirar, descarta o pacote
+            if ttl <= 1:
+                # No passo 5, um ICMP será enviado aqui
+                return
+
+            # Acha a rota para o destino
+            next_hop = self._next_hop(dst_addr)
+            if next_hop is None:
+                # Se não houver rota, descarta o pacote
+                return
+
+            # Cria uma cópia mutável do cabeçalho original
+            novo_header_mutavel = bytearray(datagrama[:header_len])
+
+            # Decrementa o TTL (byte de índice 8)
+            novo_header_mutavel[8] = ttl - 1
+
+            # Zera o checksum (bytes de índice 10 e 11) para recálculo
+            novo_header_mutavel[10] = 0
+            novo_header_mutavel[11] = 0
+            
+            # Calcula o novo checksum
+            novo_checksum = calc_checksum(bytes(novo_header_mutavel))
+            
+            # Insere o novo checksum de volta no cabeçalho
+            struct.pack_into('!H', novo_header_mutavel, 10, novo_checksum)
+            
+            # Monta o novo datagrama com o cabeçalho modificado e o payload original
+            novo_datagrama = bytes(novo_header_mutavel) + payload
+            
+            # Envia o datagrama modificado. Este deve ser o ÚNICO envio.
+            self.enlace.enviar(novo_datagrama, next_hop)
 
     def _next_hop(self, dest_addr):
         """
@@ -86,7 +112,7 @@ class IP:
                 self._tabela_encaminhamento.append((rede, next_hop))
             except ValueError:
                 continue
-
+            
     def registrar_recebedor(self, callback):
         """
         Registra uma função para ser chamada quando dados vierem da camada de rede.
