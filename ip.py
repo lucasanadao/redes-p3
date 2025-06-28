@@ -1,67 +1,129 @@
-import ipaddress
 from iputils import *
+import ipaddress
+
 
 class IP:
-    def __init__(self, enlace):
+    def _init_(self, enlace):
+        """
+        Inicia a camada de rede. Recebe como argumento uma implementação
+        de camada de enlace capaz de localizar os next_hop (por exemplo,
+        Ethernet com ARP).
+        """
         self.callback = None
         self.enlace = enlace
         self.enlace.registrar_recebedor(self.__raw_recv)
         self.ignore_checksum = self.enlace.ignore_checksum
         self.meu_endereco = None
-        self.tabela = []
 
     def __raw_recv(self, datagrama):
         dscp, ecn, identification, flags, frag_offset, ttl, proto, \
-            src_addr, dst_addr, payload = read_ipv4_header(datagrama)
-        
+           src_addr, dst_addr, payload = read_ipv4_header(datagrama)
         if dst_addr == self.meu_endereco:
-            # Atua como host
+            # atua como host
             if proto == IPPROTO_TCP and self.callback:
                 self.callback(src_addr, dst_addr, payload)
         else:
-            # Atua como roteador
+            # atua como roteador
             next_hop = self._next_hop(dst_addr)
-            if next_hop:
-                # Nos Passos 4 e 5, o TTL será decrementado aqui.
-                # Por enquanto, apenas encaminha.
-                self.enlace.enviar(datagrama, next_hop)
+            # TODO: Trate corretamente o campo TTL do datagrama
+            self.enlace.enviar(datagrama, next_hop)
 
     def _next_hop(self, dest_addr):
-        try:
-            ip_destino_obj = ipaddress.ip_address(dest_addr)
-        except ValueError:
-            return None
+        """
+        Para o dest_addr dado, retorna o next_hop correspondente na tabela,
+        escolhendo a rede com maior prefixo que contém o endereço.
+        """
+        ip = ipaddress.IPv4Address(dest_addr)
+        melhor_entrada = None
+        maior_prefixo = -1
 
-        # Graças à ordenação feita em definir_tabela_encaminhamento,
-        # basta pegar o primeiro match.
-        for cidr, next_hop in self.tabela:
-            try:
-                rede = ipaddress.ip_network(cidr, strict=False)
-                if ip_destino_obj in rede:
-                    return next_hop
-            except ValueError:
-                continue
-        
-        return None
+        for rede, next_hop in self._tabela_encaminhamento:
+            if ip in rede and rede.prefixlen > maior_prefixo:
+                melhor_entrada = next_hop
+                maior_prefixo = rede.prefixlen
+
+        return melhor_entrada
+
 
     def definir_endereco_host(self, meu_endereco):
+        """
+        Define qual o endereço IPv4 (string no formato x.y.z.w) deste host.
+        Se recebermos datagramas destinados a outros endereços em vez desse,
+        atuaremos como roteador em vez de atuar como host.
+        """
         self.meu_endereco = meu_endereco
 
     def definir_tabela_encaminhamento(self, tabela):
         """
-        Define a tabela de encaminhamento. Para implementar a regra do
-        prefixo mais longo, a tabela é ordenada pela máscara de rede,
-        da mais específica (maior número) para a mais genérica (menor número).
+        Recebe uma lista de tuplas (cidr, next_hop)
+        Armazena a tabela convertendo os CIDRs para objetos IPv4Network.
         """
-        # Usamos uma função lambda como chave de ordenação.
-        # Ela extrai o número do prefixo do CIDR (o que vem depois do '/')
-        # e o converte para inteiro para ordenar.
-        # `reverse=True` faz a ordenação ser do maior para o menor.
-        self.tabela = sorted(tabela, key=lambda item: int(item[0].split('/')[1]), reverse=True)
+        self._tabela_encaminhamento = []
+        for cidr, next_hop in tabela:
+            rede = ipaddress.IPv4Network(cidr, strict=False)
+            self._tabela_encaminhamento.append((rede, next_hop))
+
 
     def registrar_recebedor(self, callback):
+        """
+        Registra uma função para ser chamada quando dados vierem da camada de rede
+        """
         self.callback = callback
 
+
     def enviar(self, segmento, dest_addr):
-        # Será implementado no Passo 2.
-        pass
+        """
+        Envia segmento para dest_addr, montando o cabeçalho IP manualmente.
+        """
+        next_hop = self._next_hop(dest_addr)
+
+        version = 4
+        ihl = 5  # cabeçalho IP padrão tem 20 bytes
+        ver_ihl = (version << 4) + ihl
+        dscp = 0
+        ecn = 0
+        total_length = 20 + len(segmento)
+        identification = 0
+        flags = 0
+        frag_offset = 0
+        flags_frag = (flags << 13) | frag_offset
+        ttl = 64
+        protocolo = IPPROTO_TCP  # assumido como padrão
+        checksum = 0  # temporariamente zero
+
+        src = str2addr(self.meu_endereco)
+        dst = str2addr(dest_addr)
+
+        # Monta cabeçalho IP com checksum = 0 para cálculo
+        header_sem_checksum = struct.pack(
+            '!BBHHHBBH4s4s',
+            ver_ihl,
+            (dscp << 2) | ecn,
+            total_length,
+            identification,
+            flags_frag,
+            ttl,
+            protocolo,
+            checksum,
+            src,
+            dst
+        )
+
+        # Calcula o checksum e remonta o cabeçalho com o valor correto
+        checksum = calc_checksum(header_sem_checksum)
+        header = struct.pack(
+            '!BBHHHBBH4s4s',
+            ver_ihl,
+            (dscp << 2) | ecn,
+            total_length,
+            identification,
+            flags_frag,
+            ttl,
+            protocolo,
+            checksum,
+            src,
+            dst
+        )
+
+        datagrama = header + segmento
+        self.enlace.enviar(datagrama, next_hop)

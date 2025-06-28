@@ -5,4 +5,5 @@ if [[ -e grader ]]; then
 else
     git clone "$GRADER_REPO" grader
 fi
+
 exec grader/run
