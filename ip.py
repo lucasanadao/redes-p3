@@ -16,6 +16,7 @@ class IP:
         self.meu_endereco = None
 
     def __raw_recv(self, datagrama):
+        # A leitura inicial continua a mesma, ela nos dá o payload corretamente fatiado
         dscp, ecn, identification, flags, frag_offset, ttl, proto, \
             src_addr, dst_addr, payload = read_ipv4_header(datagrama)
 
@@ -26,35 +27,42 @@ class IP:
         else:
             # atua como roteador
             
+            # 1. Verifica TTL
             if ttl <= 1:
+                # No Passo 5, enviaremos ICMP aqui.
                 return
 
+            # 2. Acha a rota
             next_hop = self._next_hop(dst_addr)
             if next_hop is None:
                 return
 
-            # Cria uma cópia MUTÁVEL do cabeçalho
-            novo_header_mutavel = bytearray(datagrama[:20])
+            # 3. !! A GRANDE CORREÇÃO !!
+            # Calcula o tamanho REAL do cabeçalho em bytes a partir do campo IHL.
+            # O IHL está nos 4 bits de baixo do primeiro byte.
+            header_len = (datagrama[0] & 0x0F) * 4
 
-            # Decrementa o TTL (byte de índice 8)
+            # 4. Cria a cópia mutável usando o tamanho correto do cabeçalho
+            novo_header_mutavel = bytearray(datagrama[:header_len])
+
+            # 5. Decrementa o TTL (continua no byte de índice 8)
             novo_header_mutavel[8] = ttl - 1
 
-            # Zera o campo de checksum (bytes de índice 10 e 11)
+            # 6. Zera o checksum (continua nos bytes 10 e 11)
             novo_header_mutavel[10] = 0
             novo_header_mutavel[11] = 0
 
-            # !! A CORREÇÃO ESTÁ AQUI !!
-            # Converte o bytearray de volta para bytes antes de calcular o checksum,
-            # para garantir que o tipo do dado seja o esperado pela função.
+            # 7. Calcula o novo checksum
             novo_checksum = calc_checksum(bytes(novo_header_mutavel))
 
-            # Insere o novo checksum de volta no cabeçalho mutável
+            # 8. Insere o novo checksum de volta no cabeçalho
             struct.pack_into('!H', novo_header_mutavel, 10, novo_checksum)
             
-            # Monta o novo datagrama e o envia
+            # 9. Monta o datagrama final com o cabeçalho correto e o payload original
             novo_datagrama = bytes(novo_header_mutavel) + payload
+            
             self.enlace.enviar(novo_datagrama, next_hop)
-        
+
     def _next_hop(self, dest_addr):
         """
         Para o dest_addr dado, retorna o next_hop correspondente na tabela,
