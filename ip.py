@@ -23,7 +23,6 @@ class IP:
         """
         Função de recebimento de datagramas. Roteia ou entrega para a camada superior.
         """
-        # Usamos um try/except para descartar pacotes malformados que não podem ser lidos
         try:
             header_len = (datagrama[0] & 0x0F) * 4
             dscp, ecn, identification, flags, frag_offset, ttl, proto, \
@@ -32,62 +31,49 @@ class IP:
             return
 
         if dst_addr == self.meu_endereco:
-            # Atua como host: entrega para a camada de transporte (TCP)
             if proto == IPPROTO_TCP and self.callback:
                 self.callback(src_addr, dst_addr, payload)
         else:
-            # Atua como roteador: encaminha o pacote
-            
-            # Se o TTL for expirar, descarta o pacote
             if ttl <= 1:
-                # No passo 5, um ICMP será enviado aqui
+                # No Passo 5, um ICMP será enviado aqui
                 return
 
-            # Acha a rota para o destino
             next_hop = self._next_hop(dst_addr)
             if next_hop is None:
-                # Se não houver rota, descarta o pacote
                 return
 
-            # Cria uma cópia mutável do cabeçalho original
             novo_header_mutavel = bytearray(datagrama[:header_len])
-
-            # Decrementa o TTL (byte de índice 8)
             novo_header_mutavel[8] = ttl - 1
-
-            # Zera o checksum (bytes de índice 10 e 11) para recálculo
             novo_header_mutavel[10] = 0
             novo_header_mutavel[11] = 0
             
-            # Calcula o novo checksum
             novo_checksum = calc_checksum(bytes(novo_header_mutavel))
             
-            # Insere o novo checksum de volta no cabeçalho
             struct.pack_into('!H', novo_header_mutavel, 10, novo_checksum)
             
-            # Monta o novo datagrama com o cabeçalho modificado e o payload original
             novo_datagrama = bytes(novo_header_mutavel) + payload
             
-            # Envia o datagrama modificado. Este deve ser o ÚNICO envio.
             self.enlace.enviar(novo_datagrama, next_hop)
 
     def _next_hop(self, dest_addr):
         """
-        Consulta a tabela de encaminhamento (já ordenada) e retorna o
-        primeiro next_hop correspondente.
+        Para o dest_addr dado, retorna o next_hop correspondente na tabela,
+        escolhendo a rede com maior prefixo que contém o endereço.
         """
         try:
             ip = ipaddress.IPv4Address(dest_addr)
         except ValueError:
             return None
 
-        # Como a tabela está ordenada do mais específico para o mais genérico,
-        # o primeiro match que encontrarmos é a resposta correta.
+        melhor_entrada = None
+        maior_prefixo = -1
+
         for rede, next_hop in self._tabela_encaminhamento:
-            if ip in rede:
-                return next_hop
-        
-        return None # Nenhuma rota encontrada
+            if ip in rede and rede.prefixlen > maior_prefixo:
+                melhor_entrada = next_hop
+                maior_prefixo = rede.prefixlen
+
+        return melhor_entrada
 
     def definir_endereco_host(self, meu_endereco):
         """
@@ -97,22 +83,14 @@ class IP:
 
     def definir_tabela_encaminhamento(self, tabela):
         """
-        Define a tabela de encaminhamento. A tabela é ordenada pela máscara de rede,
-        da mais específica (maior prefixo) para a mais genérica (menor prefixo),
-        para implementar a regra do "prefixo mais longo" de forma eficiente.
+        Recebe uma lista de tuplas (cidr, next_hop)
+        Armazena a tabela convertendo os CIDRs para objetos IPv4Network.
         """
-        # A chave de ordenação extrai o número do prefixo (ex: /24 -> 24)
-        # e `reverse=True` ordena do maior para o menor.
-        tabela_ordenada = sorted(tabela, key=lambda item: int(item[0].split('/')[1]), reverse=True)
-
         self._tabela_encaminhamento = []
-        for cidr, next_hop in tabela_ordenada:
-            try:
-                rede = ipaddress.IPv4Network(cidr, strict=False)
-                self._tabela_encaminhamento.append((rede, next_hop))
-            except ValueError:
-                continue
-            
+        for cidr, next_hop in tabela:
+            rede = ipaddress.IPv4Network(cidr, strict=False)
+            self._tabela_encaminhamento.append((rede, next_hop))
+
     def registrar_recebedor(self, callback):
         """
         Registra uma função para ser chamada quando dados vierem da camada de rede.
